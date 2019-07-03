@@ -1,0 +1,145 @@
+#!/usr/bin/env node
+
+const chalk = require('chalk')
+const readline = require('readline')
+const axios = require('axios');
+const jwt = require('jsonwebtoken')
+const jwkToPem = require('jwk-to-pem');
+
+/*
+  State to store the items from the various questions
+*/
+
+const state = { issuer: '', kid: '', audience: '', token: '', pem: '' }
+
+/*
+  -- Help -- command
+*/
+
+function usage() {
+  const usageText = `
+    vjwt - Verify JSON Web Token - a tool that will help you verify the JSON web tokens for either auth0 or firebase.
+
+    usage:
+      vjwt <command>
+
+      commands can be:
+
+
+      auth0:      used to verify an auth0 token
+      firebase:   used to verify a firebase token
+      help:       used to print the usage guide
+  `
+
+  console.log(usageText)
+}
+
+function errorLog(error) {
+  const eLog = chalk.red(error)
+  console.log(eLog)
+}
+
+function prompt(question) {
+  const reader = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: false,
+  })
+
+  return new Promise((resolve, error) => {
+    reader.question(question, (answer) => {
+      reader.close()
+      resolve(answer)
+    })
+  })
+}
+
+function enterToken() {
+  const question = chalk.blue(`\nEnter your jwt token:\n`)
+  return prompt(question).then(token => {
+    const decodedToken = jwt.decode(token, {complete: true})
+    state.token = token
+    state.kid = decodedToken.header.kid
+    state.issuer = decodedToken.payload.iss
+    state.audience = decodedToken.payload.aud
+    state.userId = decodedToken.payload.sub
+  })
+}
+
+function enterApiIdentifier(propertyName) {
+  const question = chalk.blue(`\nEnter your unique ${propertyName}:\n`)
+  return prompt(question).then(identifier => {
+    if (identifier !== state.audience) {
+      errorLog(`${propertyName} does not match`)
+      throw new Error()
+    }
+  })
+}
+
+function getFirebasePublicKey() {
+  const publicUrl = `https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com`
+  return axios.get(publicUrl).then(response => {
+    state.pem = response.data[state.kid]
+  })
+}
+
+function getAuth0Cert() {
+  const domain = state.issuer.match(/(?<=https:\/\/)(.*)(?=.auth0)/i)[0]
+  const publicUrl = `https://${domain}.auth0.com/.well-known/jwks.json`
+  return axios.get(publicUrl).then(response => {
+    state.pem = jwkToPem(response.data.keys[0])
+  })
+}
+
+function verifyJWT() {
+  const {token, pem, audience, issuer} = state;
+  jwt.verify(token, pem, { audience: audience, issuer: issuer, algorithms: ['RS256'] }, (error, result) => {
+    if (error) {
+      const errorMsg = chalk.red(`\n${error}`)
+      console.log(errorMsg)
+    }
+
+    if (result) {
+      const successMsg = chalk.green(`\nDecoding sucessful...\n`)
+      console.log(successMsg)
+      console.log(result)
+    }
+  })
+}
+
+/*
+  main function for cli
+*/
+
+function app() {
+  const args = process.argv
+  if (args.length > 3) {
+    errorLog(`only one argument can be accepted`)
+    usage()
+  }
+
+  switch(args[2]) {
+    case 'help':
+      usage()
+      break
+    case 'auth0':
+        enterToken()
+        .then(() => getAuth0Cert())
+        .then(() => enterApiIdentifier('Client ID'))
+        .then(() => verifyJWT())
+        .catch((err) => errorLog(`error: ${err}`))
+      break
+    case 'firebase':
+      enterToken()
+        .then(() => getFirebasePublicKey())
+        .then(() => enterApiIdentifier('Project ID'))
+        .then(() => verifyJWT())
+        .catch()
+      break
+    default:
+      errorLog(`invalid command passed`)
+      usage()
+  }  
+}
+
+app()
